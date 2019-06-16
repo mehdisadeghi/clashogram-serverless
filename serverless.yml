@@ -1,0 +1,316 @@
+# Welcome to Serverless!
+#
+# This file is the main config file for your service.
+# It's very minimal at this point and uses default values.
+# You can always add more config options for more control.
+# We've included some commented out config examples here.
+# Just uncomment any of them to get that config option.
+#
+# For full config options, check the docs:
+#    docs.serverless.com
+#
+# Happy Coding!
+
+service: clashogram-serverless # NOTE: update this with your service name
+
+# You can pin your service to only deploy with a specific Serverless version
+# Check out our docs for more details
+# frameworkVersion: "=X.X.X"
+
+provider:
+  name: aws
+  runtime: python3.7
+  vpc:
+    securityGroupIds:
+      - Fn::GetAtt: [VPCStaticIP, DefaultSecurityGroup]
+    subnetIds:
+      - Ref: SubnetPrivate
+  iamRoleStatements:
+    - Effect: Allow
+      Action:
+        - ec2:CreateNetworkInterface
+        - ec2:DeleteNetworkInterface
+        - ec2:DescribeNetworkInterfaces
+      Resource: '*'
+    - Effect: Allow
+      Action:
+        - dynamodb:Query
+        - dynamodb:Scan
+        - dynamodb:GetItem
+        - dynamodb:PutItem
+        - dynamodb:UpdateItem
+        - dynamodb:DeleteItem
+      Resource:
+        - { "Fn::GetAtt": ["WarlogDynamoDBTable", "Arn" ] }
+
+# you can overwrite defaults here
+  stage: ${opt:stage, 'dev'}
+  region: eu-central-1
+
+plugins:
+  - serverless-python-requirements
+
+custom:
+  tableName: 'warlog-table-${self:provider.stage}'
+  pythonRequirements:
+    dockerizePip: non-linux
+
+# you can add statements to the Lambda function's IAM Role here
+#  iamRoleStatements:
+#    - Effect: "Allow"
+#      Action:
+#        - "s3:ListBucket"
+#      Resource: { "Fn::Join" : ["", ["arn:aws:s3:::", { "Ref" : "ServerlessDeploymentBucket" } ] ]  }
+#    - Effect: "Allow"
+#      Action:
+#        - "s3:PutObject"
+#      Resource:
+#        Fn::Join:
+#          - ""
+#          - - "arn:aws:s3:::"
+#            - "Ref" : "ServerlessDeploymentBucket"
+#            - "/*"
+
+# you can define service wide environment variables here
+#  environment:
+#    variable1: value1
+
+# you can add packaging information here
+#package:
+#  include:
+#    - include-me.py
+#    - include-me-dir/**
+#  exclude:
+#    - exclude-me.py
+#    - exclude-me-dir/**
+
+package:
+  individually: true
+  exclude:
+    - ".*/**"
+
+functions:
+  main:
+    handler: handler.main
+    events:
+      - schedule: rate(1 minute)
+    environment:
+      WARLOG_TABLE: ${self:custom.tableName}
+      COC_API_TOKEN: ${file(./config.${self:provider.stage}.yml):COC_API_TOKEN}
+      COC_CLAN_TAG: ${file(./config.${self:provider.stage}.yml):COC_CLAN_TAG}
+      TELEGRAM_BOT_TOKEN: ${file(./config.${self:provider.stage}.yml):TELEGRAM_BOT_TOKEN}
+      TELEGRAM_CHANNEL: ${file(./config.${self:provider.stage}.yml):TELEGRAM_CHANNEL}
+      LANGUAGE: ${file(./config.${self:provider.stage}.yml):LANGUAGE}
+    reservedConcurrency: 1
+    timeout: 60
+    memorySize: 128
+
+  logger:
+    handler: handler.logger
+    events:
+      - http:
+          path: log
+          method: get
+          integration: lambda
+          request:
+            template:
+              application/json: '{ "sourceIp" : "$context.identity.sourceIp" }'
+  caller:
+    environment:
+      URI:
+        Fn::Join: ['', [https://, Ref: ApiGatewayRestApi, '.execute-api.${self:provider.region}.amazonaws.com/${self:provider.stage}/log']]
+    handler: handler.caller
+    events:
+      - http:
+          path: call
+          method: get
+
+#    The following are a few example events you can configure
+#    NOTE: Please make sure to change your handler code to work with those events
+#    Check the event documentation for details
+#    events:
+#      - http:
+#          path: users/create
+#          method: get
+#      - websocket: $connect
+#      - s3: ${env:BUCKET}
+#      - schedule: rate(10 minutes)
+#      - sns: greeter-topic
+#      - stream: arn:aws:dynamodb:region:XXXXXX:table/foo/stream/1970-01-01T00:00:00.000
+#      - alexaSkill: amzn1.ask.skill.xx-xx-xx-xx
+#      - alexaSmartHome: amzn1.ask.skill.xx-xx-xx-xx
+#      - iot:
+#          sql: "SELECT * FROM 'some_topic'"
+#      - cloudwatchEvent:
+#          event:
+#            source:
+#              - "aws.ec2"
+#            detail-type:
+#              - "EC2 Instance State-change Notification"
+#            detail:
+#              state:
+#                - pending
+#      - cloudwatchLog: '/aws/lambda/hello'
+#      - cognitoUserPool:
+#          pool: MyUserPool
+#          trigger: PreSignUp
+
+#    Define function environment variables here
+#    environment:
+#      variable2: value2
+
+# you can add CloudFormation resource templates here
+#resources:
+#  Resources:
+#    NewResource:
+#      Type: AWS::S3::Bucket
+#      Properties:
+#        BucketName: my-new-bucket
+#  Outputs:
+#     NewOutput:
+#       Description: "Description for the output"
+#       Value: "Some output value"
+
+resources:
+  Resources:
+    # Resources created according to blog post:
+    # http://techblog.financialengines.com/2016/09/26/aws-lambdas-with-a-static-outgoing-ip/
+    
+    # Step 1: Create a new VPC
+    VPCStaticIP:
+      Type: AWS::EC2::VPC
+      Properties: 
+        CidrBlock: 11.0.0.0/16
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-vpc
+    
+    # Step 2: Create 2 Subnets
+    SubnetPublic:
+      Type: AWS::EC2::Subnet
+      Properties:
+        AvailabilityZone: ${self:provider.region}b
+        CidrBlock: 11.0.0.0/24
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-public-subnet
+        VpcId:
+          Ref: VPCStaticIP
+
+    SubnetPrivate:
+      Type: AWS::EC2::Subnet
+      Properties:
+        AvailabilityZone: ${self:provider.region}b
+        CidrBlock: 11.0.1.0/24
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-private-subnet
+        VpcId:
+          Ref: VPCStaticIP
+    
+    # Step 3: Create an Internet Gateway
+    InternetGateway:
+      Type: AWS::EC2::InternetGateway
+      Properties:
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-igw
+
+    # Attach Internet Gateway to VPC
+    VPCGatewayAttachment:
+      Type: AWS::EC2::VPCGatewayAttachment
+      Properties:
+        InternetGatewayId:
+          Ref: InternetGateway
+        VpcId:
+          Ref: VPCStaticIP
+  
+    # Step 4: Create a public Route Table and Assign it to our public route
+    RouteTablePublic:
+      Type: AWS::EC2::RouteTable
+      Properties:
+        VpcId:
+          Ref: VPCStaticIP
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-public-route-tbl
+  
+    RoutePublic:
+      Type: AWS::EC2::Route
+      Properties:
+        DestinationCidrBlock: 0.0.0.0/0
+        GatewayId:
+          Ref: InternetGateway
+        RouteTableId:
+          Ref: RouteTablePublic
+  
+    SubnetRouteTableAssociationPublic:
+      Type: AWS::EC2::SubnetRouteTableAssociation
+      Properties:
+        RouteTableId:
+          Ref: RouteTablePublic
+        SubnetId:
+          Ref: SubnetPublic
+    
+    # Step 5: Create a NAT Gateway
+    # Before creating NAT Gateway, we need to create Elastic IP with vpc scope
+    EIP:
+      Type: AWS::EC2::EIP
+      Properties:
+        Domain: vpc
+  
+    NatGateway:
+      Type: AWS::EC2::NatGateway
+      Properties:
+        AllocationId:
+          Fn::GetAtt: [EIP, AllocationId]
+        SubnetId:
+          Ref: SubnetPublic
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-nat-gw
+
+    # In tutorial NAT Gateway is attached as default route 0.0.0.0/0 in main Route Table.
+    # Main Route Table is created implicitely during VPC creation and CloudFormation
+    # has no access to its ID. To overcome this limitation we create additional Route Table.
+    RouteTablePrivate:
+      Type: AWS::EC2::RouteTable
+      Properties:
+        VpcId:
+          Ref: VPCStaticIP
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-private-route
+
+    RoutePrivate:
+      Type: AWS::EC2::Route
+      Properties:
+        DestinationCidrBlock: 0.0.0.0/0
+        NatGatewayId:
+          Ref: NatGateway
+        RouteTableId:
+          Ref: RouteTablePrivate
+
+    SubnetRouteTableMainAssociationPrivate:
+      Type: AWS::EC2::SubnetRouteTableAssociation
+      Properties:
+        RouteTableId:
+          Ref: RouteTablePrivate
+        SubnetId:
+          Ref: SubnetPrivate
+
+    WarlogDynamoDBTable:
+      Type: 'AWS::DynamoDB::Table'
+      Properties:
+        AttributeDefinitions:
+          -
+            AttributeName: warId
+            AttributeType: S
+        KeySchema:
+          -
+            AttributeName: warId
+            KeyType: HASH
+        ProvisionedThroughput:
+          ReadCapacityUnits: 1
+          WriteCapacityUnits: 1
+        TableName: ${self:custom.tableName}
